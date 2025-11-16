@@ -5,7 +5,7 @@ Optical components.
 import jax
 import jax.numpy as jnp
 import equinox as eqx
-from jaxtyping import Float, Array
+from jaxtyping import Float, Complex, Bool, Array
 
 
 
