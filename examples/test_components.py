@@ -14,8 +14,8 @@ if __name__ == "__main__":
     D = 10e3
     H = D/5
 
-    bucket = Components([Slit(r0, D, H, eps=0.14+3.98j),
-                         Lens(r0, D=D, c1=1/D, c2=0., H=H, eps=1.5+0j)],
+    bucket = Components([Slit(r0, D, H, refr_index=0.14+3.98j),
+                         Lens(r0, D=D, c1=1/D, c2=0., H=H, refr_index=1.5+0j)],
                         smo_default=smo)
     print("bucket.smo_default:", bucket.smo_default)
 
@@ -36,9 +36,9 @@ if __name__ == "__main__":
     _, ax = util.fig_init((1, 2))
 
     ax_ = ax[0]
-    disp = bucket.dispersion(R)
-    disp_im = util.complex_to_rgb(disp)
-    ax_.pcolormesh(Z, X, disp_im)
+    refr = bucket.refr_index(R)
+    refr_im = util.complex_to_rgb(refr)
+    ax_.pcolormesh(Z, X, refr_im)
     ax_.set_xlabel("z [um]")
     ax_.set_ylabel("x [um]")
 
