@@ -30,16 +30,17 @@ class Components:
         return 0.5 + 0.5*jax.scipy.special.erf(x/self.smo)
 
 
-    def edge(self, r: Float[Array, "... 2"]) -> Bool[Array, "..."]:
+    def edge(self, r: Float[Array, "2 ..."]) -> Bool[Array, "..."]:
         mask_grad = jnp.array(jnp.gradient( self.mask(r) ))
         # Norm: max(abs(x))
         return jnp.linalg.norm(mask_grad, axis=0, ord=jnp.inf) > 0.25
 
 
-    def dispersion(self, r: Float[Array, "... 2"]) -> Complex[Array, "..."]:
-        res = jnp.full(r.shape[:-1], self.eps0)
-        for comp in self.bucket:
-            res += (comp.eps - self.eps0) * comp.mask(r)
+    def dispersion(self, r: Float[Array, "2 ..."]) -> Complex[Array, "..."]:
+        # Fill in the array over the domain dimensions
+        res = jnp.full(r.shape[1:], self.eps0)
+        for elem in self.bucket:
+            res += (elem.eps - self.eps0) * elem.mask(r)
         return res
 
 
@@ -68,9 +69,9 @@ class Slit(Components, eqx.Module):
             self.smo = self.smo_default
 
 
-    def mask(self, r: Float[Array, "... 2"]) -> Float[Array, "..."]:
+    def mask(self, r: Float[Array, "2 ..."]) -> Float[Array, "..."]:
         r = jnp.asarray(r)
-        x, z = r[...,0], r[...,-1]
+        x, z = r[0,...], r[-1,...]
         X1 = self.r0[0] - 0.5*self.D
         X2 = self.r0[0] + 0.5*self.D
         Z1 = self.r0[1]
@@ -107,19 +108,19 @@ class Lens(Components, eqx.Module):
             self.smo = self.smo_default
 
 
-    def mask(self, r: Float[Array, "... 2"]) -> Float[Array, "..."]:
+    def mask(self, r: Float[Array, "2 ..."]) -> Float[Array, "..."]:
         r = jnp.asarray(r)
 
         S = self.S
-        x, z = r[...,0], r[...,-1]
+        x, z = r[0,...], r[-1,...]
         x_ = x - self.r0[0]
         X1 = self.r0[0] - 0.5*self.D
         X2 = self.r0[0] + 0.5*self.D
-        # Front
+        # Front (left) edge
         c1x = self.c1 * x_
         Z1 = lambda x_: self.r0[1] + c1x*x_ / (1. + jnp.sqrt(1. - c1x**2))
         S_Z1 = jnp.where(jnp.abs(c1x) <= 1, S(z - Z1(x_)), 0)
-        # Back
+        # Back (right) edge
         c2x = self.c2 * x_
         Z2 = lambda x_: self.r0[1] + self.H + c2x*x_ / (1. + jnp.sqrt(1. - c2x**2))
         S_Z2 = jnp.where(jnp.abs(c2x) <= 1, S(Z2(x_) - z), 0)
