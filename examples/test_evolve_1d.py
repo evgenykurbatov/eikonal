@@ -1,0 +1,181 @@
+"""
+In this test, we run three solvers: one have been implemented using [Diffrax](https://github.com/patrick-kidger/diffrax), and two are of the Eikonal library. Two of them solve the wave propagation problem at high spatial resolution, and the third does it at a lower resolution.
+"""
+
+import time
+from tqdm import tqdm
+
+from scipy.integrate import solve_ivp
+
+import matplotlib.pyplot as plt
+
+from _context import eikonal
+from eikonal.components import *
+from eikonal import solver
+import util
+
+
+# A placeholder for data
+class Data: pass
+
+
+def S(x, smo):
+    """Smoothed step function"""
+    return 0.5 + 0.5*jax.scipy.special.erf(x/smo)
+
+
+def refr_index(z, args):
+    """Complex refraction index distribution"""
+    z_max, n0, n, smo = args
+    return n0 + (n - n0) * S(z - z_max/3, smo) * S(2*z_max/3 - z, smo) + 0j
+
+
+def solve_scipy(u0, v0, z_max, dz, k, n0, n, smo):
+    """
+    The SciPy ODE solver. Here, the eikonal equation is splitted for real and
+    imaginary parts.
+    """
+
+    def rhs(z, w):
+        α_1, α_2, φ_1, φ_2 = w
+
+        cn = refr_index(z, (z_max, n0, n, smo))
+        kn, kχ = k*cn.real, k*cn.imag
+
+        dα_1 = α_2
+        dα_2 = - α_2**2 + φ_2**2 - kn**2 + kχ**2
+        dφ_1 = φ_2
+        dφ_2 = - 2 * (α_2*φ_2 + kn*kχ)
+
+        return dα_1, dα_2, dφ_1, dφ_2
+
+    z = jnp.arange(0., z_max, dz)
+    w0 = (u0.real, v0.real, u0.imag, v0.imag)
+
+    saveat = z
+
+    def do_solve():
+        sol = solve_ivp(rhs, (0., z_max), w0, method='DOP853', t_eval=z,
+                        first_step=1e-3*dz, max_step=dz, rtol=1e-6, atol=1e-8)
+        return sol
+
+    sol = do_solve()
+    u = jnp.array(sol.y[0]) + 1j*jnp.array(sol.y[2])
+    v = jnp.array(sol.y[1]) + 1j*jnp.array(sol.y[3])
+
+    return z, u, v
+
+
+def solve_backward_euler(u0, v0, z_max, dz, k, n0, n, smo):
+    """
+    Backward-Euler ODE solver.
+    """
+    z = jnp.arange(0., z_max, dz)
+
+    cn = refr_index(z, (z_max, n0, n, smo))
+    kn, kχ = k*cn.real, k*cn.imag
+    f = (kn + 1j*kχ)**2
+
+    u, v = jax.jit(solver.evolve)(u0, v0, z, f)
+
+    return z, u, v
+
+
+
+if __name__ == "__main__":
+    wv = 0.632  # [um]
+    k = 2*jnp.pi/wv
+    # Background refraction index
+    n0 = 1.
+    # Refractive layer
+    n = 1.5
+    # Spatial grids
+    x = jnp.asarray(0.)
+    z_max = 100*wv
+    dz = 0.05  # [um]
+    #dz = wv/100
+    z = jnp.arange(0., z_max, dz)
+    # Profile smoothing
+    smo = 4*dz
+    #smo = 4*wv
+
+    # Initial state of the field
+    u0 = 1 + 0j
+    v0 = 0 + 1j*k*n0
+
+    #
+    # Run
+
+    print("\n* SciPy")
+    # Run
+    t0 = time.time()
+    dfx0 = Data()
+    dfx0.z, dfx0.u, dfx0.v = solve_scipy(u0, v0, z_max, dz, k, n0, n, smo)
+    print("dfx0.z.shape", dfx0.z.shape)
+    print("dfx0.u.shape", dfx0.u.shape)
+    print("dfx0.u.dtype", dfx0.u.dtype)
+    print("time:", time.time() - t0)
+
+    print("\n* Backward Euler hi-res")
+    # Warming-up
+    solve_backward_euler(0*u0, 0*v0, z_max, dz, 0*k, n0, n, smo)
+    # Run
+    t0 = time.time()
+    be0 = Data()
+    be0.z, be0.u, be0.v = solve_backward_euler(u0, v0, z_max, dz, k, n0, n, smo)
+    print("be0.z.shape", be0.z.shape)
+    print("be0.u.shape", be0.u.shape)
+    print("be0.u.dtype", be0.u.dtype)
+    print("time:", time.time() - t0)
+
+    print("\n* Backward Euler low-res")
+    # Warming-up
+    solve_backward_euler(0*u0, 0*v0, z_max, 10*dz, 0*k, n0, n, smo)
+    # Run
+    t0 = time.time()
+    be1 = Data()
+    be1.z, be1.u, be1.v = solve_backward_euler(u0, v0, z_max, 10*dz, k, n0, n, smo)
+    print("be1.z.shape", be1.z.shape)
+    print("be1.u.shape", be1.u.shape)
+    print("be1.u.dtype", be1.u.dtype)
+    print("time:", time.time() - t0)
+
+    #
+    # Plot
+
+    _, ax = util.fig_init((4, 1), dims=(10, 4))
+
+    ax_ = ax[0]
+    ax_.set_title("u.real")
+    ax_.axhline(1, ls=':', c='gray')
+    ax_.axhline(1 - 0.5*jnp.log(n/n0), ls=':', c='gray')
+    ax_.plot(dfx0.z/wv, dfx0.u.real, 'k', label="dfx0")
+    ax_.plot(be0.z/wv, be0.u.real, '-', label="be0")
+    ax_.plot(be1.z/wv, be1.u.real, '-o', label="be1")
+    ax_.legend(frameon=False)
+
+    ax_ = ax[1]
+    ax_.set_title("u.imag")
+    ax_.plot(dfx0.z/wv, dfx0.u.imag, 'k', label="dfx0")
+    ax_.plot(be0.z/wv, be0.u.imag, '-', label="be0")
+    ax_.plot(be1.z/wv, be1.u.imag, '-o', label="be1")
+    ax_.legend(frameon=False)
+
+    ax_ = ax[2]
+    ax_.set_title("v.real")
+    ax_.plot(dfx0.z/wv, dfx0.v.real, 'k', label="dfx0")
+    ax_.plot(be0.z/wv, be0.v.real, '-', label="be0")
+    ax_.plot(be1.z/wv, be1.v.real, '-o', label="be1")
+    ax_.legend(frameon=False)
+
+    ax_ = ax[3]
+    ax_.set_title("v.imag")
+    ax_.axhline(k*n0, ls=':', c='gray')
+    ax_.axhline(k*n, ls=':', c='gray')
+    ax_.plot(dfx0.z/wv, dfx0.v.imag, 'k', label="dfx0")
+    ax_.plot(be0.z/wv, be0.v.imag, '-', label="be0")
+    ax_.plot(be1.z/wv, be1.v.imag, '-o', label="be1")
+    ax_.legend(frameon=False)
+
+    plt.show()
+    plt.close()
