@@ -3,9 +3,10 @@ In this test, we run three solvers: one have been implemented using [Diffrax](ht
 """
 
 import time
-from tqdm import tqdm
 
-from scipy.integrate import solve_ivp
+import diffrax
+from diffrax import diffeqsolve, ODETerm, SaveAt
+from diffrax import PIDController, Dopri5, Tsit5, Kvaerno3
 
 import matplotlib.pyplot as plt
 
@@ -16,7 +17,9 @@ import util
 
 
 # A placeholder for data
-class Data: pass
+class Data:
+    def __init__(self, name=None):
+        self.name = name
 
 
 def S(x, smo):
@@ -30,13 +33,13 @@ def refr_index(z, args):
     return n0 + (n - n0) * S(z - z_max/3, smo) * S(2*z_max/3 - z, smo) + 0j
 
 
-def solve_scipy(u0, v0, z_max, dz, k, n0, n, smo):
+def solve_diffrax(u0, v0, z_max, dz, k, n0, n, smo):
     """
-    The SciPy ODE solver. Here, the eikonal equation is splitted for real and
+    The Diffrax ODE solver. Here, the eikonal equation is splitted for real and
     imaginary parts.
     """
 
-    def rhs(z, w):
+    def rhs(z, w, _):
         α_1, α_2, φ_1, φ_2 = w
 
         cn = refr_index(z, (z_max, n0, n, smo))
@@ -52,33 +55,49 @@ def solve_scipy(u0, v0, z_max, dz, k, n0, n, smo):
     z = jnp.arange(0., z_max, dz)
     w0 = (u0.real, v0.real, u0.imag, v0.imag)
 
-    saveat = z
+    term = ODETerm(rhs)
+    #solver = diffrax.Dopri8()
+    #solver = diffrax.Tsit5()
+    solver = diffrax.Kvaerno5()
+    stepsize_controller = PIDController(rtol=1e-5, atol=1e-6)
+    #stepsize_controller = PIDController(rtol=1e-6, atol=1e-7)
+    #stepsize_controller = PIDController(rtol=1e-5, atol=1e-7,
+    #                                    pcoeff=0.08, icoeff=0.03, dcoeff=0,
+    #                                    safety=0.85, factormax=1.8, factormin=0.3,)
+    saveat = SaveAt(ts=z)
 
     def do_solve():
-        sol = solve_ivp(rhs, (0., z_max), w0, method='DOP853', t_eval=z,
-                        first_step=1e-3*dz, max_step=dz, rtol=1e-6, atol=1e-8)
+        sol = diffeqsolve(term, solver, z[0], z[-1], 1e-3*dz, w0,
+                          max_steps=1_000_000,
+                          saveat=saveat, stepsize_controller=stepsize_controller)
         return sol
 
-    sol = do_solve()
-    u = jnp.array(sol.y[0]) + 1j*jnp.array(sol.y[2])
-    v = jnp.array(sol.y[1]) + 1j*jnp.array(sol.y[3])
+    sol = jax.jit(do_solve)()
+    u = jnp.array(sol.ys[0]) + 1j*jnp.array(sol.ys[2])
+    v = jnp.array(sol.ys[1]) + 1j*jnp.array(sol.ys[3])
 
     return z, u, v
 
 
-def solve_backward_euler(u0, v0, z_max, dz, k, n0, n, smo):
+def solve_eikonal(u0, v0, z_max, dz, k, n0, n, smo, core_func, dz_factor=1.0):
     """
-    Backward-Euler ODE solver.
+    Eikonal solver wrapper.
     """
-    z = jnp.arange(0., z_max, dz)
+    saveat = jnp.arange(0., z_max, dz)
 
-    cn = refr_index(z, (z_max, n0, n, smo))
-    kn, kχ = k*cn.real, k*cn.imag
-    f = (kn + 1j*kχ)**2
+    def k_func(z):
+        cn = refr_index(z, (z_max, n0, n, smo))
+        return k * cn
 
-    u, v = jax.jit(solver.evolve)(u0, v0, z, f)
+    def perp_func(z, u):
+        return jnp.zeros_like(u)
 
-    return z, u, v
+    def dz_func(z, u, v):
+        return dz * dz_factor
+
+    u, v = solver.propagate(u0, v0, saveat, dz_func, k_func, perp_func, core_func)
+
+    return saveat, u, v
 
 
 
@@ -100,44 +119,44 @@ if __name__ == "__main__":
     #smo = 4*wv
 
     # Initial state of the field
-    u0 = 1 + 0j
+    u0 = 0 + 0j
     v0 = 0 + 1j*k*n0
 
     #
     # Run
 
-    print("\n* SciPy")
+    print("\n* Diffrax solver")
     # Run
     t0 = time.time()
-    dfx0 = Data()
-    dfx0.z, dfx0.u, dfx0.v = solve_scipy(u0, v0, z_max, dz, k, n0, n, smo)
-    print("dfx0.z.shape", dfx0.z.shape)
-    print("dfx0.u.shape", dfx0.u.shape)
-    print("dfx0.u.dtype", dfx0.u.dtype)
+    dfx = Data("Diffrax")
+    dfx.z, dfx.u, dfx.v = solve_diffrax(u0, v0, z_max, dz, k, n0, n, smo)
+    print("dfx.z.shape", dfx.z.shape)
+    print("dfx.u.shape", dfx.u.shape)
+    print("dfx.u.dtype", dfx.u.dtype)
     print("time:", time.time() - t0)
 
-    print("\n* Backward Euler hi-res")
+    print("\n* Eikonal full solver")
     # Warming-up
-    solve_backward_euler(0*u0, 0*v0, z_max, dz, 0*k, n0, n, smo)
+    solve_eikonal(0*u0, 0*v0, z_max, dz, 0*k, n0, n, smo, solver.core_cn)
     # Run
     t0 = time.time()
-    be0 = Data()
-    be0.z, be0.u, be0.v = solve_backward_euler(u0, v0, z_max, dz, k, n0, n, smo)
-    print("be0.z.shape", be0.z.shape)
-    print("be0.u.shape", be0.u.shape)
-    print("be0.u.dtype", be0.u.dtype)
+    eik0 = Data("Eikonal full")
+    eik0.z, eik0.u, eik0.v = solve_eikonal(u0, v0, z_max, dz, k, n0, n, smo, solver.core_cn, dz_factor=0.1)
+    print("eik0.z.shape", eik0.z.shape)
+    print("eik0.u.shape", eik0.u.shape)
+    print("eik0.u.dtype", eik0.u.dtype)
     print("time:", time.time() - t0)
 
-    print("\n* Backward Euler low-res")
+    print("\n* Eikonal SVEA solver")
     # Warming-up
-    solve_backward_euler(0*u0, 0*v0, z_max, 10*dz, 0*k, n0, n, smo)
+    solve_eikonal(0*u0, 0*v0, z_max, dz, 0*k, n0, n, smo, solver.core_svea)
     # Run
     t0 = time.time()
-    be1 = Data()
-    be1.z, be1.u, be1.v = solve_backward_euler(u0, v0, z_max, 10*dz, k, n0, n, smo)
-    print("be1.z.shape", be1.z.shape)
-    print("be1.u.shape", be1.u.shape)
-    print("be1.u.dtype", be1.u.dtype)
+    svea = Data("Eikonal SVEA")
+    svea.z, svea.u, svea.v = solve_eikonal(u0, v0, z_max, dz, k, n0, n, smo, solver.core_svea)
+    print("svea.z.shape", svea.z.shape)
+    print("svea.u.shape", svea.u.shape)
+    print("svea.u.dtype", svea.u.dtype)
     print("time:", time.time() - t0)
 
     #
@@ -147,35 +166,38 @@ if __name__ == "__main__":
 
     ax_ = ax[0]
     ax_.set_title("u.real")
-    ax_.axhline(1, ls=':', c='gray')
-    ax_.axhline(1 - 0.5*jnp.log(n/n0), ls=':', c='gray')
-    ax_.plot(dfx0.z/wv, dfx0.u.real, 'k', label="dfx0")
-    ax_.plot(be0.z/wv, be0.u.real, '-', label="be0")
-    ax_.plot(be1.z/wv, be1.u.real, '-o', label="be1")
+    ax_.axhline(u0.real, ls=':', c='gray')
+    ax_.axhline(u0.real - 0.5*jnp.log(n/n0), ls=':', c='gray')
+    ax_.plot(dfx.z/wv, dfx.u.real, 'k', label=dfx.name)
+    ax_.plot(eik0.z/wv, eik0.u.real, '-', label=eik0.name)
+    ax_.plot(svea.z/wv, svea.u.real, '-o', label=svea.name)
     ax_.legend(frameon=False)
 
     ax_ = ax[1]
     ax_.set_title("u.imag")
-    ax_.plot(dfx0.z/wv, dfx0.u.imag, 'k', label="dfx0")
-    ax_.plot(be0.z/wv, be0.u.imag, '-', label="be0")
-    ax_.plot(be1.z/wv, be1.u.imag, '-o', label="be1")
+    ax_.plot(dfx.z/wv, dfx.u.imag, 'k', label=dfx.name)
+    ax_.plot(eik0.z/wv, eik0.u.imag, '-', label=eik0.name)
+    ax_.plot(svea.z/wv, svea.u.imag, '-o', label=svea.name)
     ax_.legend(frameon=False)
 
     ax_ = ax[2]
     ax_.set_title("v.real")
-    ax_.plot(dfx0.z/wv, dfx0.v.real, 'k', label="dfx0")
-    ax_.plot(be0.z/wv, be0.v.real, '-', label="be0")
-    ax_.plot(be1.z/wv, be1.v.real, '-o', label="be1")
+    ax_.plot(dfx.z/wv, dfx.v.real, 'k', label=dfx.name)
+    ax_.plot(eik0.z/wv, eik0.v.real, '-', label=eik0.name)
     ax_.legend(frameon=False)
 
     ax_ = ax[3]
     ax_.set_title("v.imag")
     ax_.axhline(k*n0, ls=':', c='gray')
     ax_.axhline(k*n, ls=':', c='gray')
-    ax_.plot(dfx0.z/wv, dfx0.v.imag, 'k', label="dfx0")
-    ax_.plot(be0.z/wv, be0.v.imag, '-', label="be0")
-    ax_.plot(be1.z/wv, be1.v.imag, '-o', label="be1")
+    ax_.plot(dfx.z/wv, dfx.v.imag, 'k', label=dfx.name)
+    ax_.plot(eik0.z/wv, eik0.v.imag, '-', label=eik0.name)
     ax_.legend(frameon=False)
+
+
+
+    for ax_ in ax.ravel():
+        ax_.set_xlabel("z/λ")
 
     plt.show()
     plt.close()
